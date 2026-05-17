@@ -21,6 +21,7 @@ object ChatInputSubmitActions {
     const val BLOCK = "block"
     const val REPLACE = "replace"
     const val CONSUME = "consume"
+    const val DEFER = "defer"
 }
 
 data class ChatInputHookContext(
@@ -43,6 +44,9 @@ data class ChatInputHookResult(
     val text: String? = null,
     val message: String? = null,
     val clearInput: Boolean = false,
+    val debounceMs: Long? = null,
+    val deferKey: String? = null,
+    val waitUntilIdle: Boolean = true,
     val metadata: Map<String, Any?> = emptyMap()
 )
 
@@ -105,6 +109,12 @@ object ChatInputHookRegistry {
             when (result.action.trim().lowercase()) {
                 ChatInputSubmitActions.BLOCK -> return result.copy(action = ChatInputSubmitActions.BLOCK)
                 ChatInputSubmitActions.CONSUME -> return result.copy(action = ChatInputSubmitActions.CONSUME)
+                ChatInputSubmitActions.DEFER -> {
+                    return result.copy(
+                        action = ChatInputSubmitActions.DEFER,
+                        text = result.text ?: current.text
+                    )
+                }
                 ChatInputSubmitActions.REPLACE -> {
                     val replacement = result.text ?: current.text
                     current =

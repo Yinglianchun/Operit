@@ -127,10 +127,13 @@ export namespace ToolPkg {
         | "view_closed";
 
     export interface ChatInputHookObjectResult extends JsonObject {
-        action?: "allow" | "block" | "replace" | "consume";
+        action?: "allow" | "block" | "replace" | "consume" | "defer";
         text?: string;
         message?: string;
         clearInput?: boolean;
+        debounceMs?: number;
+        deferKey?: string;
+        waitUntilIdle?: boolean;
         metadata?: JsonObject;
     }
 

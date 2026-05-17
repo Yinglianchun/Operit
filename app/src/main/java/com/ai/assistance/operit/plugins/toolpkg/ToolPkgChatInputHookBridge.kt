@@ -97,6 +97,12 @@ internal object ToolPkgChatInputHookBridge {
                 when (parsed.action) {
                     ChatInputSubmitActions.BLOCK,
                     ChatInputSubmitActions.CONSUME -> return@withContext parsed
+                    ChatInputSubmitActions.DEFER -> {
+                        return@withContext parsed.copy(
+                            action = ChatInputSubmitActions.DEFER,
+                            text = parsed.text ?: current.text
+                        )
+                    }
                     ChatInputSubmitActions.REPLACE -> {
                         val replacement = parsed.text ?: current.text
                         current =
@@ -174,6 +180,7 @@ internal object ToolPkgChatInputHookBridge {
                     when (actionValue) {
                         ChatInputSubmitActions.BLOCK -> ChatInputSubmitActions.BLOCK
                         ChatInputSubmitActions.CONSUME -> ChatInputSubmitActions.CONSUME
+                        ChatInputSubmitActions.DEFER -> ChatInputSubmitActions.DEFER
                         ChatInputSubmitActions.REPLACE -> ChatInputSubmitActions.REPLACE
                         ChatInputSubmitActions.ALLOW -> ChatInputSubmitActions.ALLOW
                         "" -> if (decoded.containsKey("text")) ChatInputSubmitActions.REPLACE else return null
@@ -192,10 +199,36 @@ internal object ToolPkgChatInputHookBridge {
                     text = textValue,
                     message = decoded["message"]?.toString(),
                     clearInput = decoded["clearInput"] == true,
+                    debounceMs = decoded["debounceMs"].asLongOrNull(),
+                    deferKey = decoded["deferKey"]?.toString(),
+                    waitUntilIdle = decoded["waitUntilIdle"].asBoolean(defaultValue = true),
                     metadata = metadata
                 )
             }
             else -> null
+        }
+    }
+
+    private fun Any?.asLongOrNull(): Long? {
+        return when (this) {
+            is Number -> toLong()
+            is String -> trim().toLongOrNull()
+            else -> null
+        }
+    }
+
+    private fun Any?.asBoolean(defaultValue: Boolean): Boolean {
+        return when (this) {
+            is Boolean -> this
+            is String -> {
+                when (trim().lowercase()) {
+                    "true", "1", "yes" -> true
+                    "false", "0", "no" -> false
+                    else -> defaultValue
+                }
+            }
+            is Number -> toInt() != 0
+            else -> defaultValue
         }
     }
 }

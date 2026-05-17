@@ -353,6 +353,7 @@ interface PromptTurn {
 - `{ action: 'block', message?: string }`
 - `{ action: 'replace', text: string }`
 - `{ action: 'consume', message?: string, clearInput?: boolean }`
+- `{ action: 'defer', text?: string, message?: string, clearInput?: boolean, debounceMs?: number, deferKey?: string, waitUntilIdle?: boolean }`：由宿主暂存本次文本，等待输入停止后合并发送。`deferKey` 相同的消息会合并；`waitUntilIdle` 默认为 `true`，表示 AI 忙时继续等待。
 - 或对应的 `Promise`
 
 ### Prompt 相关返回

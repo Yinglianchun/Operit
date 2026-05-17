@@ -59,6 +59,7 @@ import com.ai.assistance.operit.ui.features.chat.components.style.input.agent.Ag
 import com.ai.assistance.operit.ui.features.chat.components.style.input.classic.ClassicChatInputSection
 import com.ai.assistance.operit.ui.features.chat.components.style.input.common.ChatInputEvents
 import com.ai.assistance.operit.ui.features.chat.components.style.input.common.ChatInputHookContext
+import com.ai.assistance.operit.ui.features.chat.components.style.input.common.ChatInputHookResult
 import com.ai.assistance.operit.ui.features.chat.components.style.input.common.ChatInputHookRegistry
 import com.ai.assistance.operit.ui.features.chat.components.style.input.common.ChatInputSubmitActions
 import com.ai.assistance.operit.ui.features.chat.components.style.input.classic.ClassicChatSettingsBar
@@ -91,6 +92,7 @@ import com.ai.assistance.operit.ui.common.rememberLocal
 import com.ai.assistance.operit.ui.main.components.LocalIsCurrentScreen
 import com.ai.assistance.operit.ui.main.components.LocalSetScreenSoftInputMode
 import com.ai.assistance.operit.ui.main.components.LocalSetUseScreenImePadding
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.delay
 import androidx.compose.ui.draw.clipToBounds
@@ -108,6 +110,9 @@ import com.ai.assistance.operit.plugins.chatview.ChatViewHookParams
 import com.ai.assistance.operit.plugins.chatview.ChatViewHookPluginRegistry
 import java.util.UUID
 
+private const val CHAT_INPUT_DEFER_DEFAULT_DEBOUNCE_MS = 1800L
+private const val CHAT_INPUT_DEFER_MAX_DEBOUNCE_MS = 60_000L
+private const val CHAT_INPUT_DEFER_DEFAULT_KEY = "default"
 
 @RequiresApi(Build.VERSION_CODES.O)
 @OptIn(ExperimentalMaterial3Api::class)
@@ -1596,8 +1601,20 @@ private fun ChatInputBottomBar(
     var nextPendingQueueId by remember(currentChatId) { mutableStateOf(1L) }
     var wasQueueBlocked by remember(currentChatId) { mutableStateOf(false) }
     var suppressNextAutoDequeue by remember(currentChatId) { mutableStateOf(false) }
+    val deferredChatBuffers = remember(currentChatId) { mutableStateMapOf<String, MutableList<String>>() }
+    val deferredChatJobs = remember(currentChatId) { mutableStateMapOf<String, Job>() }
+    var lastChatInputChangeAt by remember(currentChatId) { mutableStateOf(0L) }
     val latestQueueBlocked = rememberUpdatedState(isQueueBlocked)
     val latestCurrentChatId = rememberUpdatedState(currentChatId)
+    val latestLastChatInputChangeAt = rememberUpdatedState(lastChatInputChangeAt)
+
+    DisposableEffect(currentChatId) {
+        onDispose {
+            deferredChatJobs.values.forEach { it.cancel() }
+            deferredChatJobs.clear()
+            deferredChatBuffers.clear()
+        }
+    }
 
     fun buildChatInputHookContext(
         eventName: String,
@@ -1626,6 +1643,7 @@ private fun ChatInputBottomBar(
     }
 
     fun handleUserMessageChange(value: TextFieldValue) {
+        lastChatInputChangeAt = System.currentTimeMillis()
         actualViewModel.updateUserMessage(value)
         ChatInputHookRegistry.dispatchNotification(
             buildChatInputHookContext(
@@ -1642,6 +1660,89 @@ private fun ChatInputBottomBar(
         if (normalizedMessage.isNotBlank()) {
             Toast.makeText(context, normalizedMessage, Toast.LENGTH_SHORT).show()
         }
+    }
+
+    fun normalizeDeferredDebounceMs(value: Long?): Long {
+        return (value ?: CHAT_INPUT_DEFER_DEFAULT_DEBOUNCE_MS)
+            .coerceIn(0L, CHAT_INPUT_DEFER_MAX_DEBOUNCE_MS)
+    }
+
+    suspend fun waitForDeferredChatFlush(debounceMs: Long, waitUntilIdle: Boolean) {
+        while (true) {
+            val lastInputChangeAt = latestLastChatInputChangeAt.value
+            val elapsed =
+                if (lastInputChangeAt > 0L) {
+                    System.currentTimeMillis() - lastInputChangeAt
+                } else {
+                    debounceMs
+                }
+            val remaining = debounceMs - elapsed
+            if (remaining > 0L) {
+                delay(remaining)
+                continue
+            }
+            if (waitUntilIdle && latestQueueBlocked.value) {
+                snapshotFlow { latestQueueBlocked.value }.first { !it }
+                delay(250)
+                continue
+            }
+            return
+        }
+    }
+
+    fun scheduleDeferredChatSubmit(
+        submitDecision: ChatInputHookResult,
+        fallbackText: String,
+        source: String
+    ) {
+        val finalText = (submitDecision.text ?: fallbackText).trim()
+        if (finalText.isBlank()) return
+
+        val deferKey =
+            submitDecision.deferKey
+                ?.trim()
+                ?.takeIf { it.isNotBlank() }
+                ?: CHAT_INPUT_DEFER_DEFAULT_KEY
+        val debounceMs = normalizeDeferredDebounceMs(submitDecision.debounceMs)
+        val buffer = deferredChatBuffers.getOrPut(deferKey) { mutableListOf() }
+        buffer.add(finalText)
+        lastChatInputChangeAt = System.currentTimeMillis()
+
+        deferredChatJobs.remove(deferKey)?.cancel()
+        deferredChatJobs[deferKey] =
+            coroutineScope.launch {
+                waitForDeferredChatFlush(debounceMs, submitDecision.waitUntilIdle)
+                val pendingMessages = deferredChatBuffers.remove(deferKey)?.toList().orEmpty()
+                deferredChatJobs.remove(deferKey)
+
+                val mergedText = pendingMessages.joinToString("\n").trim()
+                if (mergedText.isBlank()) return@launch
+
+                val chatId = latestCurrentChatId.value
+                if (chatId.isNullOrBlank()) {
+                    Toast.makeText(
+                        context,
+                        context.getString(R.string.chat_please_create_new_chat),
+                        Toast.LENGTH_SHORT,
+                    ).show()
+                    return@launch
+                }
+
+                focusManager.clearFocus()
+                actualViewModel.sendTextMessage(mergedText)
+                actualViewModel.resetAttachmentPanelState()
+                onRequestAutoScrollToBottom()
+                ChatInputHookRegistry.dispatchNotification(
+                    buildChatInputHookContext(
+                        eventName = ChatInputEvents.SUBMITTED,
+                        text = mergedText,
+                        selectionStart = mergedText.length,
+                        selectionEnd = mergedText.length,
+                        source = source,
+                        submitSource = "defer"
+                    )
+                )
+            }
     }
 
     fun restorePendingQueueItem(item: PendingQueueMessageItem) {
@@ -1677,6 +1778,15 @@ private fun ChatInputBottomBar(
                         return@launch
                     }
                     ChatInputSubmitActions.CONSUME -> {
+                        showChatInputHookMessage(submitDecision.message)
+                        return@launch
+                    }
+                    ChatInputSubmitActions.DEFER -> {
+                        scheduleDeferredChatSubmit(
+                            submitDecision = submitDecision,
+                            fallbackText = item.text,
+                            source = "queue"
+                        )
                         showChatInputHookMessage(submitDecision.message)
                         return@launch
                     }
@@ -1778,6 +1888,20 @@ private fun ChatInputBottomBar(
                         actualViewModel.updateUserMessage(TextFieldValue(""))
                         actualViewModel.resetAttachmentPanelState()
                     }
+                    showChatInputHookMessage(submitDecision.message)
+                    return@launch
+                }
+                ChatInputSubmitActions.DEFER -> {
+                    val originalText = userMessage.text
+                    if (submitDecision.clearInput) {
+                        actualViewModel.updateUserMessage(TextFieldValue(""))
+                        actualViewModel.resetAttachmentPanelState()
+                    }
+                    scheduleDeferredChatSubmit(
+                        submitDecision = submitDecision,
+                        fallbackText = originalText,
+                        source = inputStyle
+                    )
                     showChatInputHookMessage(submitDecision.message)
                     return@launch
                 }
